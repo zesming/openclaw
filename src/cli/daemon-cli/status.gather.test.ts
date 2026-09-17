@@ -10,6 +10,7 @@ import { afterEach, assert, beforeEach, describe, expect, it, vi } from "vitest"
 import { WebSocketServer } from "ws";
 import { useAutoCleanupTempDirTracker } from "../../../test/helpers/temp-dir.js";
 import { TEST_TLS_CERT_PEM, TEST_TLS_KEY_PEM } from "../../../test/helpers/tls-fixture.js";
+import { REDACTED_SENTINEL } from "../../config/redact-sentinel.js";
 import type { ExtraGatewayService } from "../../daemon/inspect.js";
 import type { ForeignLaunchdJob } from "../../daemon/launchd-foreign-jobs.js";
 import type { StaleOpenClawUpdateLaunchdJob } from "../../daemon/launchd.js";
@@ -43,6 +44,7 @@ import type { GatewayRestartSnapshot } from "./restart-health.js";
 import { gatherDaemonStatus, renderPortDiagnosticsForCli } from "./status.gather.js";
 import {
   callGatewayStatusProbe,
+  capturePrintedDaemonStatus,
   formatPortDiagnostics,
   inspectPortConnections,
   inspectPortUsage,
@@ -1378,21 +1380,13 @@ describe("gatherDaemonStatus", () => {
           writeJson.mockRestore();
         }
 
-        const log = vi.spyOn(defaultRuntime, "log").mockImplementation(() => {});
-        const error = vi.spyOn(defaultRuntime, "error").mockImplementation(() => {});
-        try {
-          printDaemonStatus(status, { json: false, deep: true });
-          const output = log.mock.calls.flat().join("\n");
-          expect(output).toContain("Service: LaunchAgent (unknown)");
-          expect(output).not.toContain("Service: LaunchAgent (not loaded)");
-          expect(output).toContain(
-            "Runtime: unknown (service runtime inspection failed; retry with openclaw gateway status --deep)",
-          );
-          expect(output).not.toContain("系統找不到指定的檔案");
-        } finally {
-          log.mockRestore();
-          error.mockRestore();
-        }
+        const output = capturePrintedDaemonStatus(status, { json: false, deep: true }).logs;
+        expect(output).toContain("Service: LaunchAgent (unknown)");
+        expect(output).not.toContain("Service: LaunchAgent (not loaded)");
+        expect(output).toContain(
+          "Runtime: unknown (service runtime inspection failed; retry with openclaw gateway status --deep)",
+        );
+        expect(output).not.toContain("系統找不到指定的檔案");
       }),
     1_000,
   );
@@ -2208,61 +2202,58 @@ describe("gatherDaemonStatus", () => {
     expect(probeInput.password).toBeUndefined();
   });
 
-  it("degrades safely when daemon probe auth SecretRef is unresolved", async () => {
-    daemonLoadedConfig = {
-      gateway: {
-        bind: "lan",
-        tls: { enabled: true },
-        auth: {
-          mode: "token",
-          token: { source: "env", provider: "default", id: "MISSING_DAEMON_GATEWAY_TOKEN" },
+  it.each([
+    { ok: true, redacted: false },
+    { ok: false, redacted: false },
+    { ok: true, redacted: true },
+    { ok: false, redacted: true },
+  ])(
+    "reports unavailable probe auth with redacted=$redacted and ok=$ok",
+    async ({ ok, redacted }) => {
+      const id = redacted ? "DAEMON_GATEWAY_TOKEN" : "MISSING_DAEMON_GATEWAY_TOKEN";
+      daemonLoadedConfig = {
+        gateway: {
+          bind: "lan",
+          tls: { enabled: true },
+          auth: {
+            mode: "token",
+            token: { source: "env", provider: "default", id },
+          },
         },
-      },
-      secrets: {
-        providers: {
-          default: { source: "env" },
-        },
-      },
-    };
-
-    const status = await gatherStatus();
-
-    const probeInput = callArg(callGatewayStatusProbe) as { token?: string; password?: string };
-    expect(probeInput.token).toBeUndefined();
-    expect(probeInput.password).toBeUndefined();
-    expect(status.rpc?.authWarning).toBeUndefined();
-  });
-
-  it("surfaces authWarning when daemon probe auth SecretRef is unresolved and probe fails", async () => {
-    daemonLoadedConfig = {
-      gateway: {
-        bind: "lan",
-        tls: { enabled: true },
-        auth: {
-          mode: "token",
-          token: { source: "env", provider: "default", id: "MISSING_DAEMON_GATEWAY_TOKEN" },
-        },
-      },
-      secrets: {
-        providers: {
-          default: { source: "env" },
-        },
-      },
-    };
-    callGatewayStatusProbe.mockResolvedValueOnce({
-      ok: false,
-      error: "gateway closed",
-      url: "wss://127.0.0.1:19001",
-    });
-
-    const status = await gatherStatus();
-
-    expect(status.rpc?.ok).toBe(false);
-    expect(status.rpc?.authWarning).toContain(
-      "gateway.auth.token SecretRef is unresolved in this command path",
-    );
-    expect(status.rpc?.authWarning).toContain("probing without configured auth credentials");
-  });
+        secrets: { providers: { default: { source: "env" } } },
+      };
+      if (redacted) {
+        setTestEnvValue("DAEMON_GATEWAY_TOKEN", REDACTED_SENTINEL);
+      }
+      callGatewayStatusProbe.mockResolvedValueOnce({
+        ok,
+        url: "wss://127.0.0.1:19001",
+        ...(ok ? {} : { error: "gateway closed" }),
+      });
+      const status = await gatherStatus({ deep: redacted });
+      const probeInput = callArg(callGatewayStatusProbe) as { token?: string; password?: string };
+      expect(probeInput.token).toBeUndefined();
+      expect(probeInput.password).toBeUndefined();
+      expect(status.rpc?.ok).toBe(ok);
+      if (!redacted) {
+        if (ok) {
+          expect(status.rpc?.authWarning).toBeUndefined();
+        } else {
+          expect(status.rpc?.authWarning).toContain(
+            "gateway.auth.token SecretRef is unresolved in this command path",
+          );
+          expect(status.rpc?.authWarning).toContain("probing without configured auth credentials");
+        }
+        return;
+      }
+      expect(status.rpc?.authWarning).toContain("env:default:DAEMON_GATEWAY_TOKEN");
+      expect(status.rpc?.authWarning).toContain("redaction placeholder");
+      expect(status.rpc?.authWarning).toContain("openclaw doctor --fix");
+      expect(capturePrintedDaemonStatus(status, { json: false, deep: true }).errors).toContain(
+        "redaction placeholder",
+      );
+    },
+  );
 
   it("keeps service token auth authoritative over configured remote password auth", async () => {
     daemonLoadedConfig = {

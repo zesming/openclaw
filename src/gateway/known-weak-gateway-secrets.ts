@@ -1,5 +1,6 @@
 // Gateway known-weak credential guard.
 // Rejects published placeholder auth values before the gateway starts.
+import { isRedactedSecretValue } from "../config/redact-sentinel.js";
 import type { ResolvedGatewayAuth } from "./auth-resolve.js";
 
 const KNOWN_WEAK_GATEWAY_TOKEN_PLACEHOLDERS = [
@@ -35,6 +36,18 @@ export function assertGatewayAuthNotKnownWeak(
   rawToken?: unknown,
   rawPassword?: unknown,
 ): void {
+  const credentialKind = auth.mode === "token" ? "token" : "password";
+  if (
+    auth.mode !== "none" &&
+    isRedactedSecretValue(
+      auth[credentialKind] ?? (credentialKind === "token" ? rawToken : rawPassword),
+    )
+  ) {
+    throw new Error(
+      `Gateway auth ${credentialKind} is a known redaction sentinel, not a credential. ` +
+        "Run `openclaw doctor --fix` to repair the Gateway token or replace the external secret, then restart and re-pair devices.",
+    );
+  }
   if (auth.mode === "token") {
     // Token/password checks stay separate because auth mode is exclusive and
     // error text should name the credential the operator must rotate.

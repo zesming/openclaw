@@ -2,6 +2,7 @@
 import path from "node:path";
 import { expectDefined } from "@openclaw/normalization-core";
 import { uniqueStrings } from "@openclaw/normalization-core/string-normalization";
+import { isRedactedSecretValue } from "../config/redact-sentinel.js";
 import type { OpenClawConfig } from "../config/types.openclaw.js";
 import type {
   FileSecretProviderConfig,
@@ -10,7 +11,6 @@ import type {
   SecretRef,
   SecretRefSource,
 } from "../config/types.secrets.js";
-import { isValidEnvSecretRefId } from "../config/types.secrets.js";
 import { formatErrorMessage } from "../infra/errors.js";
 import { FsSafeError, readSecureFile } from "../infra/fs-safe.js";
 import { getCurrentPluginMetadataSnapshot } from "../plugins/current-plugin-metadata-snapshot.js";
@@ -29,11 +29,9 @@ import {
   resolveSecretProviderIntegrationConfig,
 } from "./provider-integrations.js";
 import {
-  formatExecSecretRefIdValidationMessage,
   isBuiltInDefaultSecretProviderRef,
-  isValidExecSecretRefId,
-  isValidFileSecretRefId,
-  isValidSecretProviderAlias,
+  normalizeAndGroupSecretRefs,
+  type ProviderRefGroup,
   resolveSecretRefProviderSourceMismatch,
   secretRefKey,
   SINGLE_VALUE_FILE_REF_ID,
@@ -81,12 +79,6 @@ type ResolutionLimits = {
 
 type ProviderResolutionOutput = Map<string, unknown>;
 
-type ProviderRefGroup = {
-  source: SecretRefSource;
-  providerName: string;
-  refs: SecretRef[];
-};
-
 export { isMissingSecretRefResolutionError, isProviderScopedSecretResolutionError };
 
 function throwUnknownProviderResolutionError(params: {
@@ -121,10 +113,6 @@ function resolveResolutionLimits(): ResolutionLimits {
     maxRefsPerProvider: DEFAULT_MAX_REFS_PER_PROVIDER,
     maxBatchBytes: DEFAULT_MAX_BATCH_BYTES,
   };
-}
-
-function toProviderKey(source: SecretRefSource, provider: string): string {
-  return `${source}:${provider}`;
 }
 
 function resolveConfiguredProvider(params: {
@@ -628,59 +616,6 @@ async function resolveProviderRefs(params: {
   }
 }
 
-function normalizeAndGroupSecretRefs(refs: SecretRef[]): ProviderRefGroup[] {
-  if (refs.length === 0) {
-    return [];
-  }
-  const uniqueRefs = new Map<string, SecretRef>();
-  for (const ref of refs) {
-    const id = ref.id.trim();
-    if (!id) {
-      throw new Error("Secret reference id is empty.");
-    }
-    if (!isValidSecretProviderAlias(ref.provider)) {
-      throw new Error(
-        `Secret reference provider must match /^[a-z][a-z0-9_-]{0,63}$/ (ref: ${ref.source}:${ref.provider}:${id}).`,
-      );
-    }
-    if (ref.source === "env" && !isValidEnvSecretRefId(id)) {
-      throw new Error(
-        `Env secret reference id must match /^[A-Z][A-Z0-9_]{0,127}$/ (ref: ${ref.source}:${ref.provider}:${id}).`,
-      );
-    }
-    if (ref.source === "file" && !isValidFileSecretRefId(id)) {
-      throw new Error(
-        `File secret reference id must be an absolute JSON pointer or "value" (ref: ${ref.source}:${ref.provider}:${id}).`,
-      );
-    }
-    if (ref.source === "store" && !isValidEnvSecretRefId(id)) {
-      throw new Error(
-        `Store secret reference id must match /^[A-Z][A-Z0-9_]{0,127}$/ (ref: ${ref.source}:${ref.provider}:${id}).`,
-      );
-    }
-    if (ref.source === "exec" && !isValidExecSecretRefId(id)) {
-      throw new Error(
-        `${formatExecSecretRefIdValidationMessage()} (ref: ${ref.source}:${ref.provider}:${id}).`,
-      );
-    }
-    uniqueRefs.set(secretRefKey(ref), { ...ref, id });
-  }
-
-  const grouped = new Map<string, ProviderRefGroup>();
-  for (const ref of uniqueRefs.values()) {
-    // Provider calls are batched by source/provider so exec providers receive one request for
-    // many ids and file providers parse once per payload.
-    const key = toProviderKey(ref.source, ref.provider);
-    const existing = grouped.get(key);
-    if (existing) {
-      existing.refs.push(ref);
-      continue;
-    }
-    grouped.set(key, { source: ref.source, providerName: ref.provider, refs: [ref] });
-  }
-  return [...grouped.values()];
-}
-
 function createProviderResolutionTasks(params: {
   groups: ProviderRefGroup[];
   options: ResolveSecretRefOptions;
@@ -718,6 +653,15 @@ function createProviderResolutionTasks(params: {
             provider: group.providerName,
             refId: ref.id,
             message: `Secret provider "${group.providerName}" did not return id "${ref.id}".`,
+          });
+        }
+        if (isRedactedSecretValue(values.get(ref.id))) {
+          throw refResolutionError({
+            code: "SECRET_REF_REDACTED_VALUE",
+            source: group.source,
+            provider: group.providerName,
+            refId: ref.id,
+            message: `Secret reference "${group.source}:${group.providerName}:${ref.id}" resolves to a redaction placeholder. Run openclaw doctor --fix to repair a store-backed Gateway token; supply a real credential for other secrets.`,
           });
         }
       }
