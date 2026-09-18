@@ -50,7 +50,7 @@ export function hasAcceptedMessageActionResult(
     result.kind === "action" &&
     result.handledBy === "plugin" &&
     pluginEnvelopeHas(result.payload, "ok");
-  return Boolean(
+  return (
     delivery?.status === "settled" &&
     !delivery.partialDelivery &&
     ((result.kind === "send" &&
@@ -58,7 +58,7 @@ export function hasAcceptedMessageActionResult(
       result.sendResult?.deliveryStatus === "sent") ||
       (delivery.primaryPlatformMessageId &&
         delivery.primaryPlatformMessageId.toLowerCase() !== "unknown") ||
-      ownerConfirmedMutation),
+      ownerConfirmedMutation)
   );
 }
 
