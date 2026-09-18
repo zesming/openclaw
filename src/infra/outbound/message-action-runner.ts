@@ -49,7 +49,6 @@ import {
 import { prepareMessageRoute, resolveMessageTarget } from "./message-action-routing.js";
 import { withSendNormalization } from "./message-action-send-payload.js";
 import { buildMessagePayload, executeMessageSend } from "./message-action-send.js";
-import type { MessageSendResult } from "./message.js";
 import {
   enforceMessageActionAllowlist,
   resolveEffectiveMessageToolsConfig,
@@ -140,16 +139,7 @@ async function handleBroadcastAction(
   if (targetChannels.length === 0) {
     throw new Error("Broadcast requires at least one configured channel.");
   }
-  const results: Array<{
-    channel: ChannelId;
-    to: string;
-    ok: boolean;
-    error?: string;
-    attempted?: false;
-    sentBeforeError?: true;
-    payload?: unknown;
-    result?: MessageSendResult;
-  }> = [];
+  const results: Extract<MessageActionResult, { kind: "broadcast" }>["payload"]["results"] = [];
   const parentIdempotencyKey = input.messageActionAuthorization?.scheduled
     ? normalizeOptionalString(params.idempotencyKey)
     : undefined;
