@@ -2147,7 +2147,6 @@ src/channels/streaming-config-readers.ts	1
 src/channels/streaming.ts	6
 src/channels/thread-bindings-policy.ts	2
 src/channels/turn/agent-run-terminal-outcome.ts	1
-src/channels/turn/delivery-result.ts	2
 src/channels/turn/execution.ts	2
 src/channels/turn/history-window.ts	1
 src/channels/turn/lifecycle.ts	3
@@ -2715,7 +2714,6 @@ src/gateway/server-methods/plugin-approval.ts	2
 src/gateway/server-methods/plugin-host-hooks.ts	1
 src/gateway/server-methods/question.ts	2
 src/gateway/server-methods/restart-request.ts	8
-src/gateway/server-methods/send.ts	2
 src/gateway/server-methods/session-catalog-terminal-start.ts	1
 src/gateway/server-methods/session-catalog.ts	5
 src/gateway/server-methods/session-create-initial-turn.ts	2

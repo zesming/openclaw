@@ -23,6 +23,7 @@ import type {
   ChannelMessageActionName,
   ChannelThreadingToolContext,
 } from "../../channels/plugins/types.public.js";
+import { isChannelPartialDeliveryError } from "../../channels/turn/partial-delivery-error.js";
 import type { OpenClawConfig } from "../../config/types.openclaw.js";
 import { normalizeMessagePresentation } from "../../interactive/payload.js";
 import { createSubsystemLogger } from "../../logging/subsystem.js";
@@ -67,7 +68,10 @@ const loadMessageActionGatewayRuntime = createLazyRuntimeModule(
   () => import("./message.gateway.runtime.js"),
 );
 
-function hasAcceptedDelivery(result: MessageActionResult): boolean {
+export function hasAcceptedMessageActionResult(
+  result: MessageActionResult,
+  acceptOwnerConfirmedMutation = false,
+): boolean {
   if (
     result.kind === "broadcast" ||
     result.dryRun ||
@@ -96,6 +100,11 @@ function hasAcceptedDelivery(result: MessageActionResult): boolean {
   ) {
     return false;
   }
+  const ownerConfirmedMutation =
+    acceptOwnerConfirmedMutation &&
+    result.kind === "action" &&
+    result.handledBy === "plugin" &&
+    pluginEnvelopeHas(result.payload, "ok");
   return Boolean(
     delivery?.status === "settled" &&
     !delivery.partialDelivery &&
@@ -103,7 +112,8 @@ function hasAcceptedDelivery(result: MessageActionResult): boolean {
       result.handledBy === "core" &&
       result.sendResult?.deliveryStatus === "sent") ||
       (delivery.primaryPlatformMessageId &&
-        delivery.primaryPlatformMessageId.toLowerCase() !== "unknown")),
+        delivery.primaryPlatformMessageId.toLowerCase() !== "unknown") ||
+      ownerConfirmedMutation),
   );
 }
 
@@ -142,7 +152,7 @@ export async function annotateSourceDelivery<T extends MessageActionResult>(
   } catch (error) {
     // Optional annotation cannot erase accepted delivery or known partial progress.
     // Keep the original result and error without adding an unproven source route.
-    if (hasAcceptedDelivery(result)) {
+    if (hasAcceptedMessageActionResult(result, authorization.scheduled !== undefined)) {
       return result;
     }
     throw error;
@@ -263,6 +273,24 @@ function isConfirmedGatewayMessageActionRejection(error: unknown): boolean {
   );
 }
 
+export function projectMessageActionPartialDelivery(error: unknown) {
+  const directDelivery = isChannelPartialDeliveryError(error) ? error.deliveryResult : undefined;
+  const gatewayDelivery =
+    error instanceof Error && error.name === "GatewayClientRequestError"
+      ? asResultRecord(asResultRecord(error)?.details)?.partialDelivery
+      : undefined;
+  const deliveryResult = directDelivery ?? gatewayDelivery;
+  return deliveryResult === undefined
+    ? undefined
+    : {
+        ok: false as const,
+        deliveryStatus: "partial_failed" as const,
+        sentBeforeError: true as const,
+        error: formatErrorMessage(error),
+        result: deliveryResult,
+      };
+}
+
 export function projectGatewayQueuedDeliveryResult(error: unknown) {
   if (!(error instanceof Error) || error.name !== "GatewayClientRequestError") {
     return undefined;
@@ -360,12 +388,21 @@ export async function executeGatewayAction(
   if (ctx.dryRun || !ctx.gateway) {
     return null;
   }
-  if (!ctx.channelPlugin?.actions?.handleAction) {
+  const channelPlugin = ctx.channelPlugin;
+  const supportsCanonicalGatewayDelivery =
+    Boolean(ctx.input.messageActionAuthorization?.scheduled && ctx.gateway.request) &&
+    channelPlugin?.outbound?.deliveryMode === "gateway" &&
+    ((params.action === "send" &&
+      Boolean(channelPlugin.message?.send?.text || channelPlugin.outbound.sendText)) ||
+      (params.action === "poll" && Boolean(channelPlugin.outbound.sendPoll))) &&
+    (!channelPlugin.actions?.handleAction ||
+      channelPlugin.actions.supportsAction?.({ action: params.action }) === false);
+  if (!channelPlugin?.actions?.handleAction && !supportsCanonicalGatewayDelivery) {
     return null;
   }
   const executionMode =
-    ctx.channelPlugin.actions.resolveExecutionMode?.({ action: params.action }) ?? "local";
-  if (executionMode !== "gateway") {
+    channelPlugin.actions?.resolveExecutionMode?.({ action: params.action }) ?? "local";
+  if (executionMode !== "gateway" && !supportsCanonicalGatewayDelivery) {
     return null;
   }
   const conversationReadOrigin = normalizeConversationReadInvocationOrigin(
@@ -437,15 +474,22 @@ export async function executeGatewayAction(
       },
     });
   } catch (error) {
-    if (
-      callerOwnsTerminalReceipt &&
-      !hadUnknownDeliveryOutcome &&
-      (error instanceof OutboundHandoffRejectedError ||
-        isConfirmedGatewayMessageActionRejection(error))
-    ) {
-      await cancelTerminalSourceReplyDelivery(terminalDeliveryReceipt);
+    const partialDelivery = ctx.input.messageActionAuthorization?.scheduled
+      ? projectMessageActionPartialDelivery(error)
+      : undefined;
+    if (partialDelivery !== undefined) {
+      payload = partialDelivery;
+    } else {
+      if (
+        callerOwnsTerminalReceipt &&
+        !hadUnknownDeliveryOutcome &&
+        (error instanceof OutboundHandoffRejectedError ||
+          isConfirmedGatewayMessageActionRejection(error))
+      ) {
+        await cancelTerminalSourceReplyDelivery(terminalDeliveryReceipt);
+      }
+      throw error;
     }
-    throw error;
   }
   if (callerOwnsTerminalReceipt) {
     try {
@@ -465,7 +509,36 @@ export async function executeGatewayAction(
       });
     }
   }
-  return params.result(payload);
+  const result = params.result(payload);
+  if (!supportsCanonicalGatewayDelivery) {
+    return result;
+  }
+  const partialDelivery = asResultRecord(payload)?.deliveryStatus === "partial_failed";
+  if (result.kind === "send") {
+    return {
+      ...result,
+      handledBy: "core",
+      ...(partialDelivery
+        ? {}
+        : {
+            // SAFETY: successful canonical Gateway sends return MessageSendResult payloads.
+            sendResult: payload as Extract<MessageActionResult, { kind: "send" }>["sendResult"],
+          }),
+    };
+  }
+  if (result.kind === "poll") {
+    return {
+      ...result,
+      handledBy: "core",
+      ...(partialDelivery
+        ? {}
+        : {
+            // SAFETY: successful canonical Gateway polls return MessagePollResult payloads.
+            pollResult: payload as Extract<MessageActionResult, { kind: "poll" }>["pollResult"],
+          }),
+    };
+  }
+  return result;
 }
 
 export async function executeMessagePoll(ctx: ResolvedActionContext): Promise<MessageActionResult> {
@@ -518,8 +591,8 @@ export async function executeMessagePoll(ctx: ResolvedActionContext): Promise<Me
   const poll = await executePollAction({
     ctx: {
       ...ctx,
-      // Poll actions expose requester IDs and turn context, without send-only
-      // authority or media grants. Preserve that plugin boundary independently.
+      // Poll actions expose requester IDs, turn context, and the same live
+      // provider-call fence as every other scheduled message action.
       mediaAccess: undefined,
       input: {
         cfg,
@@ -532,6 +605,10 @@ export async function executeMessagePoll(ctx: ResolvedActionContext): Promise<Me
         sessionId: input.sessionId,
         inboundEventKind: input.inboundEventKind,
         toolContext: input.toolContext,
+        messageActionAuthorization: input.messageActionAuthorization,
+        gatewayOwnedDelivery: input.gatewayOwnedDelivery,
+        onPlatformSendDispatch: input.onPlatformSendDispatch,
+        assertDirectAdapterHandoff: input.assertDirectAdapterHandoff,
       },
       silent: silent ?? undefined,
     },
@@ -660,35 +737,62 @@ export async function executeMessagePlugin(
   }
 
   const authorization = input.messageActionAuthorization;
-  const handled = await dispatchChannelMessageAction({
-    channel,
-    action,
-    cfg,
-    params,
-    mediaAccess,
-    mediaLocalRoots: mediaAccess.localRoots,
-    mediaReadFile: mediaAccess.readFile,
-    accountId: accountId ?? undefined,
-    requesterAccountId:
-      authorization !== undefined
-        ? authorization.requesterAccountId
-        : (input.requesterAccountId ?? undefined),
-    requesterSenderId:
-      authorization !== undefined
-        ? authorization.requesterSenderId
-        : (input.requesterSenderId ?? undefined),
-    senderIsOwner: input.senderIsOwner,
-    conversationReadOrigin: normalizeConversationReadInvocationOrigin(input.conversationReadOrigin),
-    sessionKey: input.sessionKey,
-    sessionId: input.sessionId,
-    inboundEventKind: input.inboundEventKind,
-    agentId,
-    gateway,
-    toolContext: authorization !== undefined ? authorization.toolContext : input.toolContext,
-    messageActionAuthorization: authorization,
-    assertDirectAdapterHandoff: input.assertDirectAdapterHandoff,
-    dryRun,
-  });
+  let handled;
+  try {
+    handled = await dispatchChannelMessageAction({
+      channel,
+      action,
+      cfg,
+      params,
+      mediaAccess,
+      mediaLocalRoots: mediaAccess.localRoots,
+      mediaReadFile: mediaAccess.readFile,
+      accountId: accountId ?? undefined,
+      requesterAccountId:
+        authorization !== undefined
+          ? authorization.requesterAccountId
+          : (input.requesterAccountId ?? undefined),
+      requesterSenderId:
+        authorization !== undefined
+          ? authorization.requesterSenderId
+          : (input.requesterSenderId ?? undefined),
+      senderIsOwner: input.senderIsOwner,
+      conversationReadOrigin: normalizeConversationReadInvocationOrigin(
+        input.conversationReadOrigin,
+      ),
+      sessionKey: input.sessionKey,
+      sessionId: input.sessionId,
+      inboundEventKind: input.inboundEventKind,
+      agentId,
+      gateway,
+      toolContext: authorization !== undefined ? authorization.toolContext : input.toolContext,
+      messageActionAuthorization: authorization,
+      deliveryRetryOwner: input.actionOrigin === "message-tool" ? "caller" : undefined,
+      assertDirectAdapterHandoff: input.assertDirectAdapterHandoff,
+      onPlatformSendDispatch: input.onPlatformSendDispatch,
+      skipQueue: input.skipQueue,
+      dryRun,
+    });
+  } catch (error) {
+    const partialDelivery = input.messageActionAuthorization?.scheduled
+      ? projectMessageActionPartialDelivery(error)
+      : undefined;
+    if (partialDelivery) {
+      return await annotateSourceDelivery(
+        {
+          kind: "action",
+          channel,
+          action,
+          handledBy: "plugin",
+          payload: partialDelivery,
+          dryRun,
+        },
+        ctx,
+        replyToIsExplicit,
+      );
+    }
+    throw error;
+  }
   if (!handled) {
     throw new Error(`Message action ${action} not supported for channel ${channel}.`);
   }

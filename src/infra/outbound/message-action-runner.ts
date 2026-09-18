@@ -150,6 +150,9 @@ async function handleBroadcastAction(
     payload?: unknown;
     result?: MessageSendResult;
   }> = [];
+  const parentIdempotencyKey = input.messageActionAuthorization?.scheduled
+    ? normalizeOptionalString(params.idempotencyKey)
+    : undefined;
   const hasAcceptedResult = () =>
     !input.dryRun && results.some((result) => result.ok || result.sentBeforeError);
   const errorSentBefore = (error: unknown): boolean =>
@@ -228,6 +231,9 @@ async function handleBroadcastAction(
             ...params,
             channel: targetChannel,
             target: resolved.to,
+            ...(parentIdempotencyKey
+              ? { idempotencyKey: `${parentIdempotencyKey}:${receiptDiscriminator}` }
+              : {}),
           },
         });
         const outcome = resolveMessageActionOutcome(sendResult, "Broadcast");
