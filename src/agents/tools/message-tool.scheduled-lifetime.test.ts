@@ -46,7 +46,29 @@ import {
 } from "./gateway-caller-context.js";
 import { createMessageTool } from "./message-tool-execution.js";
 
-it.each([
+it.each<{
+  cause: string;
+  revokeAt:
+    | "provider"
+    | "target"
+    | "action"
+    | "unconfirmed-action"
+    | "retry"
+    | "poll-retry"
+    | "generic-retry"
+    | "poll-provider"
+    | "multipart"
+    | "unbound"
+    | "partial-action"
+    | "config"
+    | "poll-partial";
+  action: "send" | "poll" | "reply" | "set-presence";
+  retire: (jobId: string) => void;
+  accepted: boolean;
+  partial?: boolean;
+  laterError?: string;
+  deliveryMode: "direct" | "gateway";
+}>([
   {
     cause: "message authority is durably revoked",
     revokeAt: "provider" as const,
