@@ -137,7 +137,7 @@ afterEach(async ({ task }) => {
 });
 
 describe("catalog publication session rows", () => {
-  it("publishes attempt status without rebuilding unchanged resident rows", async () => {
+  it("publishes settled attempt status without rebuilding unchanged resident rows", async () => {
     const { rows, list, refresh, initial } = await setup();
     const before = rows.materializedCount;
     const started = createDeferred();
@@ -167,7 +167,7 @@ describe("catalog publication session rows", () => {
       await refresh();
       expect((await list()).sessions).toEqual(initial.sessions);
       expect(rows.materializedCount - before).toBe(0);
-      expect(events.filter((phase) => phase === "catalog-published").length).toBeGreaterThan(2);
+      expect(events.filter((phase) => phase === "catalog-published")).toHaveLength(2);
       expect(events).toContain("catalog-failed");
     } finally {
       reply.resolve(catalog());

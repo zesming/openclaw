@@ -82,10 +82,6 @@ export function createCatalogAttemptReporter(
     started: (providers, kind = "provider") => {
       pendingProviders = providers;
       pendingKind = kind;
-      notifyPreparedModelRuntimePublication({
-        phase: "catalog-published",
-        modelFactsChanged: false,
-      });
     },
     withRefreshStatus: (catalog) => {
       // Provider renewal does not retry a failed native inventory.
