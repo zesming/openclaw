@@ -22,10 +22,8 @@ import {
   validateExplicitMessageAccountSelection,
 } from "../../infra/outbound/message-account-selection.js";
 import type { MessageActionResult } from "../../infra/outbound/message-action-contracts.js";
-import {
-  hasAcceptedMessageActionResult,
-  projectGatewayQueuedDeliveryResult,
-} from "../../infra/outbound/message-action-execution.js";
+import { projectGatewayQueuedDeliveryResult } from "../../infra/outbound/message-action-execution.js";
+import { hasAcceptedMessageActionResult } from "../../infra/outbound/message-action-result-acceptance.js";
 import { getToolResult, runMessageAction } from "../../infra/outbound/message-action-runner.js";
 import { isDeliveredCurrentSourceReplyAsync } from "../../infra/outbound/source-reply-mirror.js";
 import { readBooleanParam } from "../../plugin-sdk/boolean-param.js";
