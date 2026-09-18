@@ -396,6 +396,7 @@ src/config/plugins-allowlist.ts
 src/config/provider-policy.ts
 src/config/recovery-policy.ts
 src/config/redact-argv.ts
+src/config/redact-sentinel.ts
 src/config/redact-snapshot.raw.ts
 src/config/redact-snapshot.secret-ref.ts
 src/config/redact-snapshot.ts
