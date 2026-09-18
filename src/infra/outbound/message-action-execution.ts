@@ -29,11 +29,10 @@ import { stripUnsupportedCitationControlMarkers } from "../../shared/text/citati
 import { formatErrorMessage } from "../errors.js";
 import { throwIfAborted } from "./abort.js";
 import { assertOutboundHandoffCurrent, OutboundHandoffRejectedError } from "./deliver-handoff.js";
-import {
-  resolveMessageActionOutcome,
-  type MessageActionGateway,
-  type MessageActionResult,
-  type ResolvedActionContext,
+import type {
+  MessageActionGateway,
+  MessageActionResult,
+  ResolvedActionContext,
 } from "./message-action-contracts.js";
 import { annotateSourceDelivery } from "./message-action-result-acceptance.js";
 import { resolveAndApplyOutboundThreadId } from "./message-action-threading.js";

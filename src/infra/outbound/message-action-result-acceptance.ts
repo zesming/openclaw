@@ -118,5 +118,6 @@ export async function annotateSourceDelivery<T extends MessageActionResult>(
           },
         }
       : {}),
+    // SAFETY: preserve the concrete result variant while adding route metadata to its payloads.
   } as T;
 }
